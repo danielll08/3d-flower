@@ -1,0 +1,865 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bó Hoa 4D</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #07040d; font-family: system-ui, sans-serif; }
+    canvas { display: block; }
+    #vignette {
+      position: fixed; inset: 0; pointer-events: none;
+      background: radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(0, 0, 0, 0.55) 100%);
+    }
+    #ui {
+      position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+      display: flex; gap: 12px; align-items: center; color: #f6d9e8; user-select: none; white-space: nowrap;
+    }
+    button {
+      background: rgba(255, 120, 180, 0.15); color: #ffe3f0; border: 1px solid rgba(255, 150, 200, 0.45);
+      padding: 10px 22px; border-radius: 999px; font-size: 15px; cursor: pointer; backdrop-filter: blur(6px);
+      transition: background .2s;
+    }
+    button:hover { background: rgba(255, 120, 180, 0.32); }
+    #hint { font-size: 13px; opacity: .6; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="vignette"></div>
+  <div id="ui">
+    <button id="replay">💐 Nở lại</button>
+    <span id="hint">Kéo để xoay · Cuộn để phóng to</span>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+    // ---------- Renderer / scene ----------
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // supersample: draw at up to 1.5x the screen's pixel density, the browser scales it down for extra sharpness
+    renderer.setPixelRatio(Math.min(devicePixelRatio * 1.5, 3));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x07040d);
+    scene.fog = new THREE.FogExp2(0x07040d, 0.01);
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+    const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+    camera.position.set(0, 0.8, 15);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, -0.6, 0);
+    controls.enableDamping = true;
+    controls.minDistance = 5;
+    controls.maxDistance = 26;
+
+    // ---------- Lights ----------
+    scene.add(new THREE.HemisphereLight(0xfff2f6, 0x24152a, 0.55));
+    const key = new THREE.DirectionalLight(0xfff3e6, 2.2);
+    key.position.set(5, 8, 9);
+    key.castShadow = true;
+    key.shadow.mapSize.set(4096, 4096);
+    key.shadow.radius = 2.5;
+    key.shadow.bias = -0.0005;
+    key.shadow.normalBias = 0.03;   // thin double-sided petals otherwise shadow themselves in grey streaks
+    Object.assign(key.shadow.camera, { left: -7, right: 7, top: 7, bottom: -8 });
+    scene.add(key);
+    // soft fill that follows the viewer, so petal undersides never turn muddy brown
+    const fill = new THREE.DirectionalLight(0xfff0f5, 0.8);
+    fill.position.set(0, -0.3, 1);
+    camera.add(fill);
+    scene.add(camera);
+    const rim = new THREE.PointLight(0xff7ab0, 40, 25);
+    rim.position.set(-6, 4, -4);
+    scene.add(rim);
+
+    // ---------- Procedural textures ----------
+    // Drawn at 2x the logical size (the drawing code keeps working in logical units) for crisper detail.
+    const TEX_SCALE = 2;
+    function canvasTexture(w, h, draw, srgb = true) {
+      const c = document.createElement('canvas');
+      c.width = w * TEX_SCALE; c.height = h * TEX_SCALE;
+      const g = c.getContext('2d');
+      g.scale(TEX_SCALE, TEX_SCALE);
+      draw(g, w, h);
+      const tex = new THREE.CanvasTexture(c);
+      if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      return tex;
+    }
+
+    // Petal: fine veins fanning from the base, darker edges and base, light speckle.
+    function drawPetalBase(g, w, h) {
+      g.fillStyle = '#fff';
+      g.fillRect(0, 0, w, h);
+      const base = g.createLinearGradient(0, h, 0, h * 0.6);
+      base.addColorStop(0, 'rgba(0,0,0,0.12)'); base.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = base; g.fillRect(0, 0, w, h);
+      for (let i = 0; i < 30; i++) {
+        const x1 = (i / 29) * w + (Math.random() - 0.5) * 10;
+        g.strokeStyle = `rgba(90,30,50,${0.04 + Math.random() * 0.05})`;
+        g.lineWidth = 0.8 + Math.random() * 1.2;
+        g.beginPath();
+        g.moveTo(w / 2 + (Math.random() - 0.5) * 16, h);
+        g.quadraticCurveTo(w / 2 + (x1 - w / 2) * 0.35, h * 0.5, x1, -10);
+        g.stroke();
+      }
+      // a raised central groove, typical of lily tepals
+      g.strokeStyle = 'rgba(255,255,255,0.35)'; g.lineWidth = 5;
+      g.beginPath(); g.moveTo(w / 2, h); g.lineTo(w / 2, h * 0.15); g.stroke();
+      for (let i = 0; i < 3000; i++) {
+        g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.03)';
+        g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+      }
+    }
+    const petalTex = canvasTexture(256, 512, drawPetalBase);
+    // Pink lily: same base plus the deep raspberry freckles and tiny raised papillae near the throat.
+    const lilySpotTex = canvasTexture(256, 512, (g, w, h) => {
+      drawPetalBase(g, w, h);
+      for (let i = 0; i < 170; i++) {
+        const v = 0.08 + Math.pow(Math.random(), 1.4) * 0.5;      // concentrated near the base
+        const spread = 0.42 * (0.5 + v);
+        const x = w / 2 + (Math.random() - 0.5) * 2 * spread * w * 0.5;
+        const y = h * (1 - v);
+        g.fillStyle = `rgba(${140 + Math.random() * 40},${10 + Math.random() * 20},${60 + Math.random() * 30},${0.55 + Math.random() * 0.35})`;
+        g.beginPath(); g.ellipse(x, y, 1.5 + Math.random() * 3, 2 + Math.random() * 4, 0, 0, Math.PI * 2); g.fill();
+      }
+    });
+
+    // Leaf: strong midrib and side veins.
+    const leafTex = canvasTexture(256, 512, (g, w, h) => {
+      g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+      g.strokeStyle = 'rgba(255,255,230,0.5)'; g.lineWidth = 5;
+      g.beginPath(); g.moveTo(w / 2, h); g.lineTo(w / 2, 0); g.stroke();
+      g.lineWidth = 1.6;
+      for (let i = 0; i < 16; i++) {
+        const y = h - (i + 1) * (h / 17);
+        for (const s of [-1, 1]) {
+          g.strokeStyle = 'rgba(255,255,230,0.28)';
+          g.beginPath(); g.moveTo(w / 2, y);
+          g.quadraticCurveTo(w / 2 + s * w * 0.2, y - 20, w / 2 + s * w * 0.5, y - 60); g.stroke();
+        }
+      }
+      for (let i = 0; i < 3000; i++) {
+        g.fillStyle = 'rgba(0,0,0,0.05)';
+        g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+      }
+    });
+
+    // Wrapping paper: fibres and soft creases (used as colour map and bump map).
+    function paperTexture(srgb) {
+      const tex = canvasTexture(512, 512, (g, w, h) => {
+        g.fillStyle = '#f2f2f2'; g.fillRect(0, 0, w, h);
+        for (let i = 0; i < 12000; i++) {
+          const v = Math.random() < 0.5 ? 255 : 0;
+          g.fillStyle = `rgba(${v},${v},${v},0.04)`;
+          g.fillRect(Math.random() * w, Math.random() * h, 1 + Math.random() * 3, 1);
+        }
+        for (let i = 0; i < 40; i++) {
+          let x = Math.random() * w, y = Math.random() * h;
+          g.strokeStyle = Math.random() < 0.5 ? 'rgba(0,0,0,0.07)' : 'rgba(255,255,255,0.2)';
+          g.lineWidth = 1 + Math.random() * 3;
+          g.beginPath(); g.moveTo(x, y);
+          for (let k = 0; k < 4; k++) { x += (Math.random() - 0.5) * 140; y += Math.random() * 110; g.lineTo(x, y); }
+          g.stroke();
+        }
+      }, srgb);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(4, 2);
+      return tex;
+    }
+
+    // ---------- Petal geometry (bud shape + "open" morph target) ----------
+    function makePetalGeometry({
+      len, wid, cupBud, cupOpen, curlOpen, base, mid, tip,
+      pw = 0.62, pq = 0.55, tipIn = 0.18, edgeRoll = 0, ruffle = 0.025, edge = null, edgeAmt = 0,
+    }) {
+      const g = new THREE.PlaneGeometry(1, 1, 18, 36);
+      const pos = g.attributes.position;
+      const bud = new Float32Array(pos.count * 3);
+      const open = new Float32Array(pos.count * 3);
+      const col = new Float32Array(pos.count * 3);
+      const cBase = new THREE.Color(base), cMid = new THREE.Color(mid), cTip = new THREE.Color(tip), c = new THREE.Color();
+      const cEdge = edge !== null ? new THREE.Color(edge) : null;
+
+      for (let i = 0; i < pos.count; i++) {
+        const u = pos.getX(i) * 2;        // -1..1 across
+        const v = pos.getY(i) + 0.5;      // 0..1 along
+        // width profile; never exactly 0 so no triangle collapses (zero normals -> NaN pixels)
+        const w = Math.max(0.03, Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(v, pw))), pq));
+        const x = u * w * wid * 0.5;
+        const y = v * len;
+        const wave = ruffle * len * Math.sin(u * 7 + v * 11) * Math.abs(u) * v;
+
+        // Bud: edges cupped inward, tip curving toward centre
+        bud[i * 3] = x * 0.85;
+        bud[i * 3 + 1] = y;
+        bud[i * 3 + 2] = -cupBud * x * x * 2 - tipIn * len * v * v;
+
+        // Open: flatter, tip curling back outward, wavy edges
+        open[i * 3] = x;
+        open[i * 3 + 1] = y * 0.97;
+        open[i * 3 + 2] = -cupOpen * x * x * 2 + curlOpen * len * v * v * v + wave
+          + edgeRoll * len * Math.pow(Math.abs(u), 3) * v * v;
+
+        if (v < 0.45) c.copy(cBase).lerp(cMid, v / 0.45);
+        else c.copy(cMid).lerp(cTip, (v - 0.45) / 0.55);
+        // slightly lighter along the midrib; optional pale margin (pink lilies fade to white at the edges)
+        c.offsetHSL(0, 0, 0.05 * (1 - Math.abs(u)) * v);
+        if (cEdge) c.lerp(cEdge, edgeAmt * THREE.MathUtils.smoothstep(Math.abs(u), 0.35, 1.0) * Math.min(1, v * 2.5));
+        col.set([c.r, c.g, c.b], i * 3);
+      }
+
+      const openGeo = g.clone();
+      g.setAttribute('position', new THREE.BufferAttribute(bud, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      g.computeVertexNormals();
+      openGeo.setAttribute('position', new THREE.BufferAttribute(open, 3));
+      openGeo.computeVertexNormals();
+      g.morphAttributes.position = [openGeo.attributes.position];
+      g.morphAttributes.normal = [openGeo.attributes.normal];
+      return g;
+    }
+
+    const petalProps = {
+      vertexColors: true, side: THREE.DoubleSide, roughness: 0.5,
+      sheen: 1, sheenColor: new THREE.Color(0xffe0ec), sheenRoughness: 0.35,
+      clearcoat: 0.1, clearcoatRoughness: 0.6,
+    };
+    const plainPetalMat = new THREE.MeshPhysicalMaterial({ ...petalProps, map: petalTex });
+    const spotPetalMat = new THREE.MeshPhysicalMaterial({ ...petalProps, map: lilySpotTex });
+    const greenMat = new THREE.MeshStandardMaterial({ color: 0x3f7f3a, roughness: 0.6, side: THREE.DoubleSide });
+    const leafMat = new THREE.MeshPhysicalMaterial({
+      vertexColors: true, map: leafTex, roughness: 0.45, side: THREE.DoubleSide, clearcoat: 0.3, clearcoatRoughness: 0.5,
+    });
+
+    const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+    const up = new THREE.Vector3(0, 1, 0);
+
+    // Every flower in the bouquet registers its petals here so one loop animates them all.
+    const flowers = [];
+
+    function addPetal(parent, geo, mat, { angle, radius, closed, open, delay, morphMax = 1, jitter = 0.08 }) {
+      const holder = new THREE.Group();
+      holder.rotation.y = angle;
+      const pivot = new THREE.Group();
+      pivot.position.set(0, 0, radius);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.rotation.z = (Math.random() - 0.5) * jitter;
+      mesh.scale.setScalar(0.93 + Math.random() * 0.14);
+      mesh.morphTargetInfluences = [0];
+      pivot.add(mesh);
+      holder.add(pivot);
+      parent.add(holder);
+      return { pivot, mesh, closed, open, delay, morphMax, phase: Math.random() * Math.PI * 2 };
+    }
+
+    // ---------- Lilies ----------
+    const LILIES = {
+      // double pink oriental lily: 4 rings of tepals, white margins, raspberry freckles
+      // (double lilies hide their stamens among the extra tepals)
+      pink: {
+        base: 0xf6efd2, mid: 0xe0447f, tip: 0xec80a8, edge: 0xfff4f8, edgeAmt: 0.5, mat: spotPetalMat, stamens: false,
+        layers: [
+          { n: 3, len: 1.6,  wid: 0.95, r: 0.1,  open: 1.02, curl: 0.3,  off: 0 },
+          { n: 3, len: 1.55, wid: 0.9,  r: 0.08, open: 0.92, curl: 0.27, off: Math.PI / 3 },
+          { n: 6, len: 1.32, wid: 0.75, r: 0.05, open: 0.72, curl: 0.22, off: Math.PI / 6 },
+          { n: 6, len: 1.05, wid: 0.65, r: 0.03, open: 0.46, curl: 0.15, off: 0 },
+        ],
+      },
+      // single white lily with a pale green throat
+      white: {
+        base: 0xc9e29a, mid: 0xf7f5ec, tip: 0xfdfdfa, edge: null, edgeAmt: 0, mat: plainPetalMat, stamens: true,
+        layers: [
+          { n: 3, len: 1.7,  wid: 0.88, r: 0.1,  open: 1.05, curl: 0.35, off: 0 },
+          { n: 3, len: 1.65, wid: 0.8,  r: 0.08, open: 0.95, curl: 0.3,  off: Math.PI / 3 },
+        ],
+      },
+      // long green bud that stays closed
+      bud: {
+        base: 0x4f8034, mid: 0x86b456, tip: 0xc3dc96, edge: null, edgeAmt: 0, mat: plainPetalMat, stamens: false, closedOnly: true,
+        layers: [
+          { n: 3, len: 1.6, wid: 0.62, r: 0.04, open: -0.05, curl: 0, off: 0 },
+        ],
+      },
+    };
+    const lilyGeoCache = new Map();
+    function lilyPetalGeo(kind, L) {
+      const k = `${kind}-${L.len}-${L.wid}-${L.curl}`;
+      if (!lilyGeoCache.has(k)) {
+        const P = LILIES[kind];
+        lilyGeoCache.set(k, makePetalGeometry({
+          len: L.len, wid: L.wid, cupBud: 1.5, cupOpen: 0.45, curlOpen: L.curl, tipIn: P.closedOnly ? 0.24 : 0.2,
+          ruffle: P.closedOnly ? 0 : 0.06, base: P.base, mid: P.mid, tip: P.tip, edge: P.edge, edgeAmt: P.edgeAmt,
+        }));
+      }
+      return lilyGeoCache.get(k);
+    }
+
+    const filamentMat = new THREE.MeshStandardMaterial({ color: 0xe9f0c8, roughness: 0.5 });
+    const antherMat = new THREE.MeshStandardMaterial({ color: 0x6e3216, roughness: 0.8 });
+    const stigmaMat = new THREE.MeshStandardMaterial({ color: 0x9fc24f, roughness: 0.5 });
+
+    function createLily(kind, start) {
+      const P = LILIES[kind];
+      const head = new THREE.Group();
+      const petals = [];
+      const n = P.layers.length;
+      P.layers.forEach((L, li) => {
+        const geo = lilyPetalGeo(kind, L);
+        for (let j = 0; j < L.n; j++) {
+          petals.push(addPetal(head, geo, P.mat, {
+            angle: L.off + (j / L.n) * Math.PI * 2 + (Math.random() - 0.5) * 0.12,
+            radius: L.r, closed: -0.05, open: L.open + (Math.random() - 0.5) * 0.06,
+            // outer tepals open first
+            delay: start + (n - 1 - li) * 0.45 + j * 0.06, morphMax: P.closedOnly ? 0 : 1,
+          }));
+        }
+      });
+
+      let stamens = null;
+      if (P.stamens) {
+        stamens = new THREE.Group();
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2 + 0.3;
+          const reach = 0.28 + Math.random() * 0.1;
+          const curve = new THREE.CatmullRomCurve3([
+            new THREE.Vector3(0, 0, 0), new THREE.Vector3(Math.sin(a) * reach * 0.3, 0.5, Math.cos(a) * reach * 0.3),
+            new THREE.Vector3(Math.sin(a) * reach, 0.95, Math.cos(a) * reach),
+          ]);
+          stamens.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 12, 0.012, 5), filamentMat));
+          const anther = new THREE.Mesh(new THREE.CapsuleGeometry(0.028, 0.12, 4, 8), antherMat);
+          anther.position.copy(curve.getPoint(1));
+          anther.rotation.set(0, a, Math.PI / 2);
+          stamens.add(anther);
+        }
+        const style = new THREE.CatmullRomCurve3([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.03, 0.55, 0.02), new THREE.Vector3(0.08, 1.08, 0.05)]);
+        stamens.add(new THREE.Mesh(new THREE.TubeGeometry(style, 12, 0.02, 6), filamentMat));
+        const stigma = new THREE.Mesh(new THREE.SphereGeometry(0.06, 12, 10), stigmaMat);
+        stigma.position.copy(style.getPoint(1));
+        stamens.add(stigma);
+        stamens.scale.setScalar(0.001);
+        head.add(stamens);
+      }
+
+      const receptacle = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12), greenMat);
+      receptacle.scale.set(1, 1.4, 1);
+      head.add(receptacle);
+      return { head, petals, stamens, stamenAt: 0.4 };
+    }
+
+    // ---------- Bouquet: a dense dome of flowers, held facing the viewer ----------
+    const TILT = 1.12;                                // how far the bouquet is tipped toward the viewer
+    const tilt = new THREE.Group();
+    tilt.rotation.x = TILT;
+    tilt.position.y = 0.4;
+    scene.add(tilt);
+    const bouquet = new THREE.Group();
+    tilt.add(bouquet);
+
+    const DOME_C = new THREE.Vector3(0, -2.4, 0);      // centre of the sphere the flower heads sit on
+    const DOME_R = 4.0;
+    const DOME_MAX = 0.98;                             // polar angle of the dome's edge (rad)
+    const BIND = new THREE.Vector3(0, -4.7, 0);       // where the stems are tied
+    const domePoint = (i, n, phase = 0, lift = 0) => {
+      const cosT = 1 - (1 - Math.cos(DOME_MAX)) * (i + 0.5) / n;
+      const sinT = Math.sqrt(1 - cosT * cosT);
+      const phi = i * GOLDEN + phase;
+      const nrm = new THREE.Vector3(sinT * Math.cos(phi), cosT, sinT * Math.sin(phi));
+      return { pos: DOME_C.clone().addScaledVector(nrm, DOME_R + lift), nrm };
+    };
+
+    // L = pink double lily, W = white lily, B = lily bud, S = blue star cluster.
+    // Types are dealt from a seeded shuffle so every part of the dome gets an even mix.
+    let seed = 7;
+    const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const PATTERN = [...'L'.repeat(19) + 'W'.repeat(7) + 'B'.repeat(7) + 'S'.repeat(9)];
+    for (let i = PATTERN.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [PATTERN[i], PATTERN[j]] = [PATTERN[j], PATTERN[i]];
+    }
+    const SCALE = { L: 0.66, W: 0.68, B: 0.56 };
+    const stemMat = new THREE.MeshStandardMaterial({ color: 0x4d8a3f, roughness: 0.5 });
+    const starSpots = [];
+    const stemLeafGeo = makePetalGeometry({ len: 0.95, wid: 0.2, cupBud: 0.6, cupOpen: 0.5, curlOpen: 0.3, base: 0x2f6a2c, mid: 0x3f8338, tip: 0x5a9a4c });
+
+    // Every flower gets its own stem: it runs back from the head, sweeps in towards the axis well inside the
+    // paper cone (whose radius is checked at each control point), passes through the tie and ends as a cut stub.
+    function addStem(pos, nrm, radius, leafCount) {
+      const radial = new THREE.Vector3(pos.x, 0, pos.z);
+      const curve = new THREE.CatmullRomCurve3([
+        pos.clone(),
+        pos.clone().addScaledVector(nrm, -1.0),
+        new THREE.Vector3(pos.x * 0.25, DOME_C.y - 0.6, pos.z * 0.25),
+        BIND.clone().addScaledVector(radial, 0.06),
+        BIND.clone().addScaledVector(radial, -0.08).add(new THREE.Vector3(0, -1.6 - rand() * 0.5, 0)),
+      ]);
+      bouquet.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 64, radius, 10), stemMat));
+      // narrow lily leaves along the upper part of the stem, angled outward
+      const dirOut = radial.lengthSq() > 1e-4 ? radial.clone().normalize() : new THREE.Vector3(1, 0, 0);
+      for (let k = 0; k < leafCount; k++) {
+        const t = 0.1 + k * 0.08 + rand() * 0.04;
+        const leaf = new THREE.Mesh(stemLeafGeo, leafMat);
+        leaf.position.copy(curve.getPoint(t));
+        const sideways = new THREE.Vector3(-dirOut.z, 0, dirOut.x).multiplyScalar((rand() - 0.5) * 1.6);
+        leaf.quaternion.setFromUnitVectors(up, curve.getTangent(t).multiplyScalar(-0.6).add(dirOut).add(sideways).normalize());
+        leaf.morphTargetInfluences = [1];
+        bouquet.add(leaf);
+      }
+    }
+
+    PATTERN.forEach((type, i) => {
+      const { pos, nrm } = domePoint(i, PATTERN.length);
+      if (type === 'S') { starSpots.push({ pos, nrm }); return; }
+      const start = 0.4 + (i / PATTERN.length) * 3.5 + Math.random() * 0.4;
+      const f = createLily({ L: 'pink', W: 'white', B: 'bud' }[type], start);
+
+      // staggered heights so neighbouring lilies overlap in layers instead of cutting through each other;
+      // buds poke a little above the open flowers
+      const lift = type === 'B' ? 0.3 : (i % 3) * 0.17;
+      const mount = new THREE.Group();
+      mount.position.copy(pos).addScaledVector(nrm, lift);
+      mount.quaternion.setFromUnitVectors(up, nrm);
+      const nod = new THREE.Group();
+      nod.scale.setScalar(SCALE[type]);
+      nod.rotation.y = Math.random() * Math.PI * 2;
+      nod.add(f.head);
+      mount.add(nod);
+      bouquet.add(mount);
+
+      addStem(mount.position, nrm, 0.05, type === 'B' ? 1 : 3);
+
+      flowers.push({ ...f, nod, baseRotY: nod.rotation.y, phase: Math.random() * Math.PI * 2, flex: 0.6 + (i / PATTERN.length) * 0.8 });
+    });
+    // extra blue clusters tucked into the gaps between the lilies
+    for (let i = 0; i < 26; i++) starSpots.push(domePoint(i, 26, 1.3, 0.1));
+
+    // ---------- Blue star flowers (Tweedia) ----------
+    {
+      // five-lobed star, slightly cupped
+      const pts = [];
+      for (let k = 0; k < 90; k++) {
+        const phi = (k / 90) * Math.PI * 2;
+        const r = 0.28 + 0.72 * Math.pow(Math.abs(Math.cos(2.5 * phi)), 0.7);
+        pts.push(new THREE.Vector2(r * Math.cos(phi), r * Math.sin(phi)));
+      }
+      const starGeo = new THREE.ShapeGeometry(new THREE.Shape(pts), 1).rotateX(-Math.PI / 2);
+      const sp = starGeo.attributes.position;
+      for (let i = 0; i < sp.count; i++) sp.setY(i, 0.22 * (sp.getX(i) ** 2 + sp.getZ(i) ** 2));
+      starGeo.scale(0.12, 0.12, 0.12);
+      starGeo.computeVertexNormals();
+
+      const per = 18;
+      const stars = new THREE.InstancedMesh(starGeo, new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.55 }), starSpots.length * per);
+      const eyes = new THREE.InstancedMesh(new THREE.SphereGeometry(0.022, 8, 6), new THREE.MeshStandardMaterial({ color: 0xeaf6ff }), starSpots.length * per);
+      const blues = [0x8cc4ee, 0x6fa9e6, 0xa6d6f4, 0x93c9d8, 0x7fb4f0].map((c) => new THREE.Color(c));
+      const sprigLeafGeo = makePetalGeometry({ len: 0.5, wid: 0.18, cupBud: 0.5, cupOpen: 0.4, curlOpen: 0.2, base: 0x3d6b33, mid: 0x5b8f4a, tip: 0x7aa865 });
+      const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
+      const t1 = new THREE.Vector3(), t2 = new THREE.Vector3(), d = new THREE.Vector3();
+      let idx = 0;
+      const pedicels = [];
+      for (const { pos, nrm } of starSpots) {
+        t1.crossVectors(nrm, Math.abs(nrm.y) < 0.9 ? up : new THREE.Vector3(1, 0, 0)).normalize();
+        t2.crossVectors(nrm, t1);
+        const centre = pos.clone().addScaledVector(nrm, 0.25);
+        // each sprig has its own stem; every little star sits on a fine stalk from the sprig's tip
+        addStem(pos, nrm, 0.025, 0);
+        for (let k = 0; k < per; k++) {
+          const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * 0.55;
+          p.copy(centre).addScaledVector(t1, Math.cos(a) * r).addScaledVector(t2, Math.sin(a) * r).addScaledVector(nrm, (0.55 - r) * 0.4);
+          d.copy(nrm).addScaledVector(t1, Math.cos(a) * r * 1.2).addScaledVector(t2, Math.sin(a) * r * 1.2).normalize();
+          q.setFromUnitVectors(up, d);
+          s.setScalar(0.8 + Math.random() * 0.45);
+          m.compose(p, q, s);
+          stars.setMatrixAt(idx, m);
+          stars.setColorAt(idx, blues[Math.floor(Math.random() * blues.length)]);
+          pedicels.push(pos.x, pos.y, pos.z, p.x, p.y, p.z);
+          m.compose(p.addScaledVector(d, 0.02), q, s.setScalar(1));
+          eyes.setMatrixAt(idx, m);
+          idx++;
+        }
+        // a few small leaves on each sprig
+        for (let k = 0; k < 3; k++) {
+          const a = Math.random() * Math.PI * 2;
+          const leaf = new THREE.Mesh(sprigLeafGeo, leafMat);
+          leaf.morphTargetInfluences = [1];
+          leaf.position.copy(pos).addScaledVector(nrm, 0.1);
+          leaf.quaternion.setFromUnitVectors(up, d.copy(nrm).multiplyScalar(0.4).addScaledVector(t1, Math.cos(a)).addScaledVector(t2, Math.sin(a)).normalize());
+          bouquet.add(leaf);
+        }
+      }
+      stars.castShadow = true;
+      bouquet.add(stars, eyes);
+      const pedGeo = new THREE.BufferGeometry();
+      pedGeo.setAttribute('position', new THREE.Float32BufferAttribute(pedicels, 3));
+      bouquet.add(new THREE.LineSegments(pedGeo, new THREE.LineBasicMaterial({ color: 0x5f8f4c })));
+    }
+
+    // ---------- Leather-leaf greenery peeking out round the edge ----------
+    const leaves = [];
+    {
+      const fernGeo = makePetalGeometry({ len: 1.3, wid: 0.5, cupBud: 0.5, cupOpen: 0.4, curlOpen: 0.3, base: 0x1d4a22, mid: 0x2a6a2f, tip: 0x3f8a3f });
+      for (let i = 0; i < 14; i++) {
+        const phi = (i / 14) * Math.PI * 2 + Math.random() * 0.3;
+        const th = DOME_MAX + 0.05;
+        const nrm = new THREE.Vector3(Math.sin(th) * Math.cos(phi), Math.cos(th), Math.sin(th) * Math.sin(phi));
+        // angled up into the paper bowl so the tips never poke through the paper
+        const out = new THREE.Vector3(Math.cos(phi), 0.75, Math.sin(phi));
+        const leaf = new THREE.Mesh(fernGeo, leafMat);
+        leaf.position.copy(DOME_C).addScaledVector(nrm, DOME_R - 0.3);
+        leaf.quaternion.setFromUnitVectors(up, out.normalize());
+        leaf.rotateY(Math.random() * Math.PI);
+        leaf.morphTargetInfluences = [1];
+        leaf.castShadow = true;
+        bouquet.add(leaf);
+        leaves.push({ leaf, base: leaf.quaternion.clone(), phase: Math.random() * 10 });
+      }
+    }
+
+    // ---------- Wrapping paper: overlapping sheets, like a florist wraps a bouquet ----------
+    const paperMap = paperTexture(true);
+    const paperBump = paperTexture(false);
+    // One sheet covers part of the circumference. All sheets share the bowl profile (wide frame at the top,
+    // cinched at the tie), but each has its own rounded top, rim rolled outward, side edges tucked under
+    // and soft creases; `layer` pushes it slightly outwards so overlapping sheets sit on top of each other.
+    function makeSheet({ thetaC, span, topR, botR, top, bottom, pinchR, flare = 2.4, color, layer }) {
+      const h = top - bottom, SX = 72, SY = 72;
+      const thetaStart = thetaC - span / 2;
+      const g = new THREE.CylinderGeometry(1, 1, h, SX, SY, true, thetaStart, span);
+      const pos = g.attributes.position;
+      for (let row = 0; row <= SY; row++) for (let col = 0; col <= SX; col++) {
+        const i = row * (SX + 1) + col;
+        const u = col / SX, t = 1 - row / SY;                     // u across the sheet, t 0 bottom .. 1 top
+        const theta = thetaStart + u * span;
+        const yw = bottom + t * h;
+        let r = botR + (topR - botR) * Math.pow(t, flare);
+        // cinched where the ribbon ties it
+        r = THREE.MathUtils.lerp(r, pinchR, Math.exp(-(((yw - BIND.y) / 0.35) ** 2)));
+        // gathered folds fanning out from the tie (flat right under the band so they don't poke through it)
+        const dy = yw - BIND.y;
+        const gather = Math.exp(-((dy / 1.3) ** 2)) * (1 - Math.exp(-((dy / 0.2) ** 2)));
+        const fold = Math.abs(Math.sin(theta * 9 + Math.sin(theta * 3 + layer) * 0.9));
+        r *= 1 + 0.16 * gather * (fold - 0.45);
+        // soft vertical creases, rim rolled outward, side edges tucked in a little
+        const edge = Math.min(u, 1 - u);
+        r *= 1 + 0.012 * Math.sin(u * span * 22 + layer * 1.7) * t;
+        r += 0.35 * Math.pow(t, 9) - 0.06 * t * (1 - THREE.MathUtils.smoothstep(edge, 0, 0.08));
+        r += layer * 0.014;
+        // rounded top edge: the sheet's corners sit lower than its middle
+        const yy = yw - 0.55 * ((2 * u - 1) ** 2) * Math.pow(t, 4);
+        pos.setXYZ(i, Math.sin(theta) * r, yy, Math.cos(theta) * r);
+      }
+      g.computeVertexNormals();
+      const mesh = new THREE.Mesh(g, new THREE.MeshPhysicalMaterial({
+        color, map: paperMap, bumpMap: paperBump, bumpScale: 0.8, roughness: 0.8, side: THREE.DoubleSide,
+        sheen: 0.3, sheenColor: new THREE.Color(0xfff6ee), sheenRoughness: 0.6,
+      }));
+      mesh.receiveShadow = true;
+      mesh.castShadow = true;
+      return mesh;
+    }
+    // outer ring: five white sheets, which also continue below the tie as a gathered sleeve round the stems
+    for (let k = 0; k < 5; k++) {
+      bouquet.add(makeSheet({
+        thetaC: (k / 5) * Math.PI * 2 + 0.2, span: 1.8, topR: 5.3 + (k % 2) * 0.25, botR: 0.27,
+        top: 0.55 + (k % 2) * 0.2, bottom: BIND.y - 1.0, pinchR: 0.36, color: k % 2 ? 0xd6d0c6 : 0xcec8bd, layer: k,
+      }));
+    }
+    // inner ring: five creamier sheets, a little lower, offset so their edges fall between the outer ones
+    for (let k = 0; k < 5; k++) {
+      bouquet.add(makeSheet({
+        thetaC: (k / 5) * Math.PI * 2 + 0.83, span: 1.7, topR: 4.9, botR: 0.3,
+        top: 0.25 + (k % 2) * 0.15, bottom: BIND.y - 0.08, pinchR: 0.3, flare: 2.2, color: 0xe0d8cc, layer: -1 - k * 0.6,
+      }));
+    }
+
+    // ---------- Pink silk ribbon ----------
+    const satin = new THREE.MeshPhysicalMaterial({
+      color: 0xf2b3c6, roughness: 0.3, sheen: 1, sheenColor: new THREE.Color(0xffd9e6), clearcoat: 0.3, side: THREE.DoubleSide,
+    });
+    // Woven satin for the wrapped tie: fine lengthwise threads and a darker woven selvedge along each edge.
+    const satinWeave = canvasTexture(256, 64, (g, w, h) => {
+      g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+      for (let y = 0; y < h; y += 1.5) {
+        g.fillStyle = `rgba(0,0,0,${0.025 + Math.random() * 0.03})`;
+        g.fillRect(0, y, w, 0.6);
+      }
+      // the cross-section runs top edge (v=0) -> outer face -> bottom edge (v=0.5) -> inner face
+      for (const y of [0, h / 2, h]) {
+        g.fillStyle = 'rgba(170,60,100,0.45)';
+        g.fillRect(0, y - 2.5, w, 5);
+      }
+    });
+    satinWeave.wrapS = satinWeave.wrapT = THREE.RepeatWrapping;
+    const satinBand = satin.clone();
+    satinBand.map = satinWeave;
+
+    // The tie: a ribbon with real thickness and rounded edges, wound twice round the gathered paper,
+    // each turn a hair further out so the layers sit on top of each other.
+    function wrappedRibbon({ turns, radius, width, thick, y0, rise }) {
+      const N = 260, M = 12, pos = [], uv = [], idx = [];
+      for (let i = 0; i <= N; i++) {
+        const s = i / N, ang = s * turns * Math.PI * 2;
+        const R = radius + s * 0.035 + 0.006 * Math.sin(ang * 5);       // slight wrinkle in the silk
+        const nx = Math.sin(ang), nz = Math.cos(ang);
+        const cy = y0 + rise * s;
+        for (let j = 0; j <= M; j++) {
+          const a = (j / M) * Math.PI * 2;
+          const off = Math.max(-1, Math.min(1, Math.sin(a) * 1.6)) * thick;   // flat faces, rounded edges
+          const rr = R + off;
+          pos.push(nx * rr, cy + Math.cos(a) * width / 2, nz * rr);
+          uv.push(s * turns * 10, j / M);
+        }
+      }
+      for (let i = 0; i < N; i++) for (let j = 0; j < M; j++) {
+        const a = i * (M + 1) + j, b = a + M + 1;
+        idx.push(a, b, a + 1, a + 1, b, b + 1);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+      g.setIndex(idx);
+      g.computeVertexNormals();
+      return g;
+    }
+    {
+      const tie = new THREE.Mesh(wrappedRibbon({ turns: 2.1, radius: 0.44, width: 0.26, thick: 0.014, y0: BIND.y - 0.1, rise: 0.2 }), satinBand);
+      tie.castShadow = true;
+      tie.receiveShadow = true;
+      bouquet.add(tie);
+    }
+    // Big bow at the lower-right edge of the paper (as in the reference photo); it lives in world space
+    // so its tails can hang straight down with gravity whatever the bouquet's tilt.
+    const BOW_ANCHOR = new THREE.Vector3(2.2, 0.8, 4.4);      // just in front of the paper rim, in bouquet space
+    // One bow loop: a wide band swept round an ellipse that starts and ends at the knot,
+    // twisted so the silk faces the viewer like a real ribbon instead of showing only its edge.
+    function ribbonLoop(side, rx, ry, width, twist) {
+      const N = 64, pos = [], idx = [];
+      const p = new THREE.Vector3(), n = new THREE.Vector3(), d = new THREE.Vector3(), z = new THREE.Vector3(0, 0, 1);
+      for (let k = 0; k <= N; k++) {
+        const th = (k / N) * Math.PI * 2;
+        p.set(side * rx * (1 - Math.cos(th)), ry * Math.sin(th), 0.08 * Math.sin(th * 2));
+        n.set(side * rx, 0, 0).sub(p).normalize();
+        // narrower where it gathers into the knot
+        const w = width * (0.35 + 0.65 * Math.sin(th / 2));
+        d.copy(z).multiplyScalar(Math.cos(twist)).addScaledVector(n, Math.sin(twist)).normalize();
+        pos.push(p.x + d.x * w / 2, p.y + d.y * w / 2, p.z + d.z * w / 2, p.x - d.x * w / 2, p.y - d.y * w / 2, p.z - d.z * w / 2);
+        if (k < N) idx.push(2 * k, 2 * k + 1, 2 * k + 2, 2 * k + 1, 2 * k + 3, 2 * k + 2);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g.setIndex(idx);
+      g.computeVertexNormals();
+      return g;
+    }
+    const bow = new THREE.Group();
+    for (const side of [-1, 1]) {
+      const loop = new THREE.Mesh(ribbonLoop(side, 0.6, 0.38, 0.55, 1.1), satin);
+      loop.rotation.z = side * 0.18;
+      loop.castShadow = true;
+      bow.add(loop);
+    }
+    {
+      const knot = new THREE.Mesh(new THREE.SphereGeometry(0.17, 18, 14), satin);
+      knot.scale.set(1, 1.1, 0.6);
+      bow.add(knot);
+    }
+    scene.add(bow);
+    // A tail: a silk strip that drapes in a soft S-curve, turns gently as it falls and ends in a V-cut.
+    function ribbonTail(side, len, wid, phase) {
+      const rows = 50, pos = [], idx = [];
+      for (let r = 0; r <= rows; r++) {
+        const s = r / rows;
+        const cx = side * (0.08 + 0.3 * s) + 0.38 * Math.sin(s * 3.4 + phase) * s;
+        const cz = 0.2 * Math.sin(s * 4 + phase) * s;
+        const a = side * 1.0 * Math.sin(s * 2.6 + phase);
+        const w = wid * (1 - 0.12 * s) / 2;
+        for (let c = -1; c <= 1; c++) {
+          const notch = r === rows && c === 0 ? 0.22 : 0;
+          pos.push(cx + Math.cos(a) * c * w, -len * s + notch, cz + Math.sin(a) * c * w);
+        }
+        if (r < rows) for (let c = 0; c < 2; c++) {
+          const i = r * 3 + c;
+          idx.push(i, i + 3, i + 1, i + 1, i + 3, i + 4);
+        }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g.setIndex(idx);
+      g.computeVertexNormals();
+      return g;
+    }
+    const bowWorld = new THREE.Vector3();
+    scene.updateMatrixWorld(true);
+    bouquet.localToWorld(bowWorld.copy(BOW_ANCHOR));
+    bow.position.copy(bowWorld);
+    bow.rotation.z = -0.15;
+    for (const [side, len, phase] of [[-1, 3.0, 0.4], [1, 3.6, 2.1]]) {
+      const tail = new THREE.Mesh(ribbonTail(side, len, 0.5, phase), satin);
+      tail.position.copy(bowWorld).add(new THREE.Vector3(0, -0.05, -0.04));
+      tail.castShadow = true;
+      scene.add(tail);
+    }
+
+    // ---------- Butterflies ----------
+    function wingTexture(inner, outer, spot) {
+      return canvasTexture(256, 256, (g, w, h) => {
+        // wing outline in a 0..1 (x right) / -0.5..0.5 (y up) frame, drawn into canvas pixels
+        const P = (x, y) => [x * w, (0.5 - y) * h];
+        const path = () => {
+          g.beginPath();
+          g.moveTo(...P(0, 0));
+          g.bezierCurveTo(...P(0.2, 0.35), ...P(0.62, 0.5), ...P(0.58, 0.18));
+          g.bezierCurveTo(...P(0.55, 0.04), ...P(0.3, 0.02), ...P(0.04, -0.01));
+          g.bezierCurveTo(...P(0.38, -0.1), ...P(0.45, -0.36), ...P(0.22, -0.4));
+          g.bezierCurveTo(...P(0.1, -0.4), ...P(0.03, -0.2), ...P(0, 0));
+          g.closePath();
+        };
+        path();
+        const grad = g.createRadialGradient(...P(0, 0), 4, ...P(0, 0), w * 0.6);
+        grad.addColorStop(0, '#111'); grad.addColorStop(0.18, inner); grad.addColorStop(0.75, outer); grad.addColorStop(1, '#111');
+        g.fillStyle = grad; g.fill();
+        g.lineWidth = 9; g.strokeStyle = '#0d0a10'; g.stroke();
+        g.save(); path(); g.clip();
+        g.strokeStyle = 'rgba(0,0,0,0.5)'; g.lineWidth = 2;
+        for (let i = 0; i < 7; i++) {
+          const a = -1.1 + i * 0.35;
+          g.beginPath(); g.moveTo(...P(0, 0)); g.lineTo(...P(Math.cos(a) * 0.7, Math.sin(a) * 0.7)); g.stroke();
+        }
+        g.fillStyle = spot;
+        for (let i = 0; i < 9; i++) {
+          const a = -1.0 + i * 0.26;
+          const [x, y] = P(Math.cos(a) * 0.5, Math.sin(a) * 0.42);
+          g.beginPath(); g.arc(x, y, 3 + Math.random() * 3, 0, Math.PI * 2); g.fill();
+        }
+        g.restore();
+      });
+    }
+    const wingGeo = new THREE.PlaneGeometry(1, 1).translate(0.5, 0, 0).rotateX(Math.PI / 2);
+    const butterflies = [
+      ['#1f7dff', '#6fd2ff', 'rgba(255,255,255,0.9)'],
+      ['#ff7a00', '#ffb347', 'rgba(255,255,255,0.85)'],
+      ['#ff4f9a', '#ffc0dc', 'rgba(255,255,255,0.8)'],
+    ].map(([inner, outer, spot], i) => {
+      const mat = new THREE.MeshStandardMaterial({ map: wingTexture(inner, outer, spot), side: THREE.DoubleSide, alphaTest: 0.5, roughness: 0.5 });
+      const group = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.03, 0.26, 4, 8), new THREE.MeshStandardMaterial({ color: 0x151015, roughness: 0.7 }));
+      body.rotation.x = Math.PI / 2;
+      group.add(body);
+      const wings = [1, -1].map((side) => {
+        const pivot = new THREE.Group();
+        const wing = new THREE.Mesh(wingGeo, mat);
+        wing.scale.x = side;
+        wing.castShadow = true;
+        pivot.add(wing);
+        group.add(pivot);
+        return { pivot, side };
+      });
+      group.scale.setScalar(0.75);
+      scene.add(group);
+      return { group, wings, speed: 0.2 + i * 0.05, offset: i * 2.1, height: 0.5 + i * 1.2, radius: 5.6 + i * 0.6 };
+    });
+    const butterflyPath = (b, t, out) => {
+      const a = t * b.speed + b.offset;
+      const r = b.radius + Math.sin(a * 0.7) * 0.8;
+      return out.set(Math.cos(a) * r, b.height + Math.sin(a * 2.3) * 0.7, 1.5 + Math.sin(a) * r * 0.6);
+    };
+
+    // ---------- Floating pollen ----------
+    const N = 700;
+    const pPos = new Float32Array(N * 3);
+    const pSpeed = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const r = 2 + Math.random() * 10, a = Math.random() * Math.PI * 2;
+      pPos.set([Math.cos(a) * r, -7 + Math.random() * 15, Math.sin(a) * r], i * 3);
+      pSpeed[i] = 0.1 + Math.random() * 0.3;
+    }
+    const pGeo = new THREE.BufferGeometry();
+    pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+    scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({
+      color: 0xffc4e1, size: 0.05, transparent: true, opacity: 0.85,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    })));
+
+
+    // ---------- Animation ----------
+    const clamp01 = (x) => Math.min(1, Math.max(0, x));
+    const easeInOut = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+    const BLOOM_DURATION = 3.6;
+    const clock = new THREE.Clock();
+    let start = 0.3;
+    const bPos = new THREE.Vector3(), bNext = new THREE.Vector3();
+
+    document.getElementById('replay').onclick = () => { start = clock.getElapsedTime() + 0.3; };
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+      const bt = t - start;
+
+      for (const f of flowers) {
+        let total = 0;
+        for (const p of f.petals) {
+          const e = easeInOut(clamp01((bt - p.delay) / BLOOM_DURATION));
+          total += e;
+          p.pivot.rotation.x = THREE.MathUtils.lerp(p.closed, p.open, e);
+          p.mesh.morphTargetInfluences[0] = e * p.morphMax;
+        }
+        if (f.stamens) {
+          const overall = total / f.petals.length;
+          f.stamens.scale.setScalar(Math.max(0.001, easeInOut(clamp01((overall - f.stamenAt) / (1 - f.stamenAt)))));
+        }
+      }
+
+      for (const b of butterflies) {
+        butterflyPath(b, t, bPos);
+        butterflyPath(b, t + 0.05, bNext);
+        b.group.position.copy(bPos);
+        b.group.lookAt(bNext);
+        const flap = 0.15 + (Math.sin(t * 17 + b.offset) * 0.5 + 0.5) * 1.1;
+        for (const w of b.wings) w.pivot.rotation.z = w.side * flap;
+        b.group.position.y += Math.sin(t * 17 + b.offset) * 0.03;
+      }
+
+      const pa = pGeo.attributes.position;
+      for (let i = 0; i < N; i++) {
+        let y = pa.getY(i) + pSpeed[i] * 0.01;
+        if (y > 8) y = -7;
+        pa.setY(i, y);
+        pa.setX(i, pa.getX(i) + Math.sin(t + i) * 0.002);
+      }
+      pa.needsUpdate = true;
+
+      controls.update();
+      // rendered straight to the canvas (no post-processing) so the browser's MSAA keeps every edge crisp
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>
